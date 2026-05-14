@@ -11,7 +11,6 @@ import (
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
-	"go.temporal.io/sdk/workflow"
 )
 
 func main() {
@@ -21,15 +20,20 @@ func main() {
 	}
 
 	// Encrypting DataConverter: reads CryptContext from workflow / Go context
-	// via workflow.ContextAware to select the keyID at encode time.
+	// via workflow.ContextAware to pick the keyID at encode time.
 	clientOptions.DataConverter = nexusperendpointencryption.NewEncryptingDataConverter(
 		converter.GetDefaultDataConverter(),
 		nexusperendpointencryption.DataConverterOptions{Compress: true},
 	)
-	// ContextPropagator carries CryptContext from the Go context (seeded by
-	// the starter) into the caller workflow's headers and on into any
-	// activities or child constructs.
-	clientOptions.ContextPropagators = []workflow.ContextPropagator{nexusperendpointencryption.NewContextPropagator()}
+
+	// One Interceptor instance, wired into both Client and Worker. The Client
+	// side stamps the keyID into workflow start headers from the starter's
+	// CryptContext; the Worker side reads it back on ExecuteWorkflow and
+	// handles the Nexus boundary.
+	ix := &nexusperendpointencryption.Interceptor{
+		EndpointKeys: nexusperendpointencryption.EndpointKeys,
+	}
+	clientOptions.Interceptors = []interceptor.ClientInterceptor{ix}
 
 	c, err := client.Dial(clientOptions)
 	if err != nil {
@@ -38,12 +42,7 @@ func main() {
 	defer c.Close()
 
 	w := worker.New(c, caller.TaskQueue, worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{
-			// The WorkerInterceptor's outbound interceptor reads
-			// input.Client.Endpoint() and seeds CryptContext on the
-			// workflow context for the duration of the Nexus call.
-			&nexusperendpointencryption.WorkerInterceptor{EndpointKeys: nexusperendpointencryption.EndpointKeys},
-		},
+		Interceptors: []interceptor.WorkerInterceptor{ix},
 	})
 
 	w.RegisterWorkflow(caller.HelloCallerWorkflow)

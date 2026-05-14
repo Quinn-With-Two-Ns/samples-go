@@ -13,7 +13,6 @@ import (
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
-	"go.temporal.io/sdk/workflow"
 )
 
 const taskQueue = "nexus-per-endpoint-encryption-handler-tq"
@@ -23,15 +22,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("Invalid arguments: %v", err)
 	}
-	// Same encrypting DataConverter wiring as the caller worker. The handler
-	// workflow inherits CryptContext from the inbound interceptor via the
-	// ContextPropagator and so encrypts its own at-rest payloads under the
-	// per-endpoint key.
+
+	// Same encrypting DataConverter wiring as the caller worker.
 	clientOptions.DataConverter = nexusperendpointencryption.NewEncryptingDataConverter(
 		converter.GetDefaultDataConverter(),
 		nexusperendpointencryption.DataConverterOptions{Compress: true},
 	)
-	clientOptions.ContextPropagators = []workflow.ContextPropagator{nexusperendpointencryption.NewContextPropagator()}
+
+	// The handler's Nexus inbound interceptor reads
+	// temporalnexus.GetOperationInfo(ctx).Endpoint and seeds CryptContext on
+	// the Go context. When temporalnexus.NewWorkflowRunOperation then issues
+	// client.ExecuteWorkflow under that ctx, the Client-side interceptor
+	// stamps the keyID onto the handler workflow's start headers; the
+	// Worker-side interceptor reads it back at ExecuteWorkflow time.
+	ix := &nexusperendpointencryption.Interceptor{
+		EndpointKeys: nexusperendpointencryption.EndpointKeys,
+	}
+	clientOptions.Interceptors = []interceptor.ClientInterceptor{ix}
 
 	c, err := client.Dial(clientOptions)
 	if err != nil {
@@ -40,14 +47,7 @@ func main() {
 	defer c.Close()
 
 	w := worker.New(c, taskQueue, worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{
-			// The inbound interceptor reads
-			// temporalnexus.GetOperationInfo(ctx).Endpoint and seeds
-			// CryptContext on the Go context, which the
-			// ContextPropagator then carries into the handler-started
-			// workflow.
-			&nexusperendpointencryption.WorkerInterceptor{EndpointKeys: nexusperendpointencryption.EndpointKeys},
-		},
+		Interceptors: []interceptor.WorkerInterceptor{ix},
 	})
 
 	svc := nexus.NewService(service.HelloServiceName)

@@ -11,7 +11,7 @@ import (
 	"github.com/temporalio/samples-go/nexus/options"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/workflow"
+	"go.temporal.io/sdk/interceptor"
 )
 
 func main() {
@@ -48,7 +48,13 @@ func main() {
 		converter.GetDefaultDataConverter(),
 		nexusperendpointencryption.DataConverterOptions{Compress: true},
 	)
-	clientOptions.ContextPropagators = []workflow.ContextPropagator{nexusperendpointencryption.NewContextPropagator()}
+	// The same Interceptor used by the caller worker. On the client side its
+	// ClientOutboundInterceptor.ExecuteWorkflow stamps the keyID from
+	// CryptContext on the Go ctx into the workflow's start headers, replacing
+	// what a workflow.ContextPropagator would otherwise do.
+	clientOptions.Interceptors = []interceptor.ClientInterceptor{
+		&nexusperendpointencryption.Interceptor{EndpointKeys: nexusperendpointencryption.EndpointKeys},
+	}
 
 	c, err := client.Dial(clientOptions)
 	if err != nil {
