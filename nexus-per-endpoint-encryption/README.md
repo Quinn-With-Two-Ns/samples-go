@@ -55,24 +55,29 @@ endpoint decode through the same server.
 
 ## Prerequisites
 
-- A running [Temporal service](https://github.com/temporalio/samples-go/tree/main/#how-to-use)
-  (the dev server works).
-- Temporal server version **>= 1.30.0** so that
-  `temporalnexus.GetOperationInfo(ctx).Endpoint` is populated on the handler
-  side. See the appendix for the fallback on older servers.
+- A running [Temporal service](https://github.com/temporalio/samples-go/tree/main/#how-to-use).
+  The dev server (>= 1.30.0) works:
+
+  ```
+  temporal server start-dev
+  ```
+
+  The 1.30.0 floor is required so that `temporalnexus.GetOperationInfo(ctx).Endpoint`
+  is populated on the handler side. See the appendix for the fallback on older
+  servers.
 - Two Nexus endpoints, both targeting the handler task queue:
 
-```
-temporal operator nexus endpoint create \
-  --name endpoint-a \
-  --target-namespace default \
-  --target-task-queue nexus-per-endpoint-encryption-handler-tq
+  ```
+  temporal operator nexus endpoint create \
+    --name endpoint-a \
+    --target-namespace default \
+    --target-task-queue nexus-per-endpoint-encryption-handler-tq
 
-temporal operator nexus endpoint create \
-  --name endpoint-b \
-  --target-namespace default \
-  --target-task-queue nexus-per-endpoint-encryption-handler-tq
-```
+  temporal operator nexus endpoint create \
+    --name endpoint-b \
+    --target-namespace default \
+    --target-task-queue nexus-per-endpoint-encryption-handler-tq
+  ```
 
 ## Steps to run
 

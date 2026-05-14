@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 )
 
 func main() {
@@ -26,14 +27,15 @@ func main() {
 		nexusperendpointencryption.DataConverterOptions{Compress: true},
 	)
 
-	// One Interceptor instance, wired into both Client and Worker. The Client
-	// side stamps the keyID into workflow start headers from the starter's
-	// CryptContext; the Worker side reads it back on ExecuteWorkflow and
-	// handles the Nexus boundary.
+	// One Interceptor instance, wired in two places: as a ContextPropagator on
+	// the client (so workflow-start headers carry CryptContext onto the
+	// workflow's root context, where result encoding can see it) and as a
+	// WorkerInterceptor on the worker (so Nexus boundary calls swap in the
+	// per-endpoint key).
 	ix := &nexusperendpointencryption.Interceptor{
 		EndpointKeys: nexusperendpointencryption.EndpointKeys,
 	}
-	clientOptions.Interceptors = []interceptor.ClientInterceptor{ix}
+	clientOptions.ContextPropagators = []workflow.ContextPropagator{ix}
 
 	c, err := client.Dial(clientOptions)
 	if err != nil {

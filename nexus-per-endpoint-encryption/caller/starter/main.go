@@ -11,7 +11,7 @@ import (
 	"github.com/temporalio/samples-go/nexus/options"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/interceptor"
+	"go.temporal.io/sdk/workflow"
 )
 
 func main() {
@@ -48,11 +48,14 @@ func main() {
 		converter.GetDefaultDataConverter(),
 		nexusperendpointencryption.DataConverterOptions{Compress: true},
 	)
-	// The same Interceptor used by the caller worker. On the client side its
-	// ClientOutboundInterceptor.ExecuteWorkflow stamps the keyID from
-	// CryptContext on the Go ctx into the workflow's start headers, replacing
-	// what a workflow.ContextPropagator would otherwise do.
-	clientOptions.Interceptors = []interceptor.ClientInterceptor{
+	// Register the Interceptor as the ContextPropagator so it can carry
+	// CryptContext from Go ctx to workflow start headers. The starter
+	// itself doesn't set CryptContext -- the caller workflow's own at-rest
+	// payloads don't need endpoint-keyed encryption. The propagator only
+	// kicks in for the Nexus call (whose CryptContext is set inside the
+	// workflow's outbound interceptor) and for the handler-side workflow
+	// (whose CryptContext is set by the handler's Nexus inbound interceptor).
+	clientOptions.ContextPropagators = []workflow.ContextPropagator{
 		&nexusperendpointencryption.Interceptor{EndpointKeys: nexusperendpointencryption.EndpointKeys},
 	}
 
@@ -75,30 +78,17 @@ func main() {
 	}
 }
 
-// runOne pre-seeds CryptContext on the Go context BEFORE calling
-// ExecuteWorkflow so that the caller workflow's own input and result payloads
-// (event #1 onward) are encrypted under the per-endpoint keyID. Without this
-// the workflow's outbound interceptor would still encrypt the Nexus call
-// payloads correctly, but the workflow's input/result would fall back to an
-// unencrypted state.
 func runOne(c client.Client, endpoint, name string) {
-	keyID, ok := nexusperendpointencryption.EndpointKeys[endpoint]
-	if !ok {
-		log.Fatalf("unknown endpoint %q -- no keyID configured", endpoint)
-	}
-
-	ctx := context.WithValue(context.Background(), nexusperendpointencryption.PropagateKey, nexusperendpointencryption.CryptContext{KeyID: keyID})
-
 	workflowOptions := client.StartWorkflowOptions{
 		ID:        "nexus-per-endpoint-encryption_" + endpoint + "_" + time.Now().Format("20060102150405.000000"),
 		TaskQueue: caller.TaskQueue,
 	}
 
-	wr, err := c.ExecuteWorkflow(ctx, workflowOptions, caller.HelloCallerWorkflow, endpoint, name)
+	wr, err := c.ExecuteWorkflow(context.Background(), workflowOptions, caller.HelloCallerWorkflow, endpoint, name)
 	if err != nil {
 		log.Fatalln("Unable to execute workflow", err)
 	}
-	log.Println("Started workflow", "Endpoint", endpoint, "KeyID", keyID, "WorkflowID", wr.GetID(), "RunID", wr.GetRunID())
+	log.Println("Started workflow", "Endpoint", endpoint, "WorkflowID", wr.GetID(), "RunID", wr.GetRunID())
 
 	var result string
 	if err := wr.Get(context.Background(), &result); err != nil {

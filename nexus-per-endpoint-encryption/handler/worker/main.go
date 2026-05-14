@@ -13,6 +13,7 @@ import (
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 )
 
 const taskQueue = "nexus-per-endpoint-encryption-handler-tq"
@@ -32,13 +33,14 @@ func main() {
 	// The handler's Nexus inbound interceptor reads
 	// temporalnexus.GetOperationInfo(ctx).Endpoint and seeds CryptContext on
 	// the Go context. When temporalnexus.NewWorkflowRunOperation then issues
-	// client.ExecuteWorkflow under that ctx, the Client-side interceptor
-	// stamps the keyID onto the handler workflow's start headers; the
-	// Worker-side interceptor reads it back at ExecuteWorkflow time.
+	// client.ExecuteWorkflow under that ctx, the ContextPropagator stamps the
+	// keyID onto the handler workflow's start headers. The
+	// ExtractToWorkflow side puts CryptContext on the workflow's root ctx
+	// before result encoding runs.
 	ix := &nexusperendpointencryption.Interceptor{
 		EndpointKeys: nexusperendpointencryption.EndpointKeys,
 	}
-	clientOptions.Interceptors = []interceptor.ClientInterceptor{ix}
+	clientOptions.ContextPropagators = []workflow.ContextPropagator{ix}
 
 	c, err := client.Dial(clientOptions)
 	if err != nil {
@@ -51,7 +53,7 @@ func main() {
 	})
 
 	svc := nexus.NewService(service.HelloServiceName)
-	if err := svc.Register(handler.HelloOperation); err != nil {
+	if err := svc.Register(handler.EchoOperation, handler.HelloOperation); err != nil {
 		log.Fatalln("Unable to register operations", err)
 	}
 	w.RegisterNexusService(svc)

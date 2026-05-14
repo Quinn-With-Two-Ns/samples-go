@@ -7,6 +7,7 @@ import (
 	commonpb "go.temporal.io/api/common/v1"
 
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/temporalnexus"
 	"go.temporal.io/sdk/workflow"
 )
 
@@ -51,32 +52,62 @@ func NewEncryptingDataConverter(parent converter.DataConverter, options DataConv
 	return NewContextAwareCodecDataConverter(parent, codecs...)
 }
 
-// WithWorkflowContext implements WorkflowContextAwarePayloadCodec.
+// WithWorkflowContext implements WorkflowContextAwarePayloadCodec. Inside a
+// workflow the only source of the active keyID is CryptContext (carried in
+// from the workflow start header by the ContextPropagator or attached by the
+// outbound interceptor for the duration of a Nexus call).
 func (e *Codec) WithWorkflowContext(ctx workflow.Context) converter.PayloadCodec {
-	return e.withKeyIDFromContext(ctx)
+	return e.withKeyID(keyIDFromCrypt(ctx))
 }
 
-// WithContext implements WorkflowContextAwarePayloadCodec.
+// WithContext implements WorkflowContextAwarePayloadCodec. On the Nexus
+// handler's sync result encoding path there's no CryptContext on ctx (the
+// inbound interceptor's wrap is local to the chain and doesn't escape), so
+// we fall back to reading the operation's endpoint via
+// temporalnexus.GetOperationInfo and looking up the keyID in EndpointKeys.
+// This works because the SDK applies WithContext on this path; ctx carries
+// the NexusOperationContext put there by the framework.
 func (e *Codec) WithContext(ctx context.Context) converter.PayloadCodec {
-	return e.withKeyIDFromContext(ctx)
+	keyID := keyIDFromCrypt(ctx)
+	if keyID == "" {
+		keyID = EndpointKeys[nexusEndpointFromCtx(ctx)]
+	}
+	return e.withKeyID(keyID)
 }
 
-// withKeyIDFromContext returns a Codec keyed by CryptContext's KeyID if one is
-// present on ctx and different from the current KeyID. Returning the receiver
-// unchanged when nothing changes lets ContextAwareCodecDataConverter skip the
-// per-call allocation.
-func (e *Codec) withKeyIDFromContext(ctx interface{ Value(key interface{}) interface{} }) converter.PayloadCodec {
-	v, ok := ctx.Value(PropagateKey).(CryptContext)
-	if !ok || v.KeyID == e.KeyID {
+func (e *Codec) withKeyID(keyID string) converter.PayloadCodec {
+	if keyID == e.KeyID {
 		return e
 	}
-	return &Codec{KeyID: v.KeyID}
+	return &Codec{KeyID: keyID}
+}
+
+func keyIDFromCrypt(ctx interface{ Value(key interface{}) interface{} }) string {
+	if v, ok := ctx.Value(PropagateKey).(CryptContext); ok {
+		return v.KeyID
+	}
+	return ""
+}
+
+// nexusEndpointFromCtx returns the endpoint name from a Nexus handler context,
+// or "" if ctx is not a Nexus operation context. GetOperationInfo panics on
+// non-Nexus contexts, so we recover.
+func nexusEndpointFromCtx(ctx context.Context) (endpoint string) {
+	defer func() { _ = recover() }()
+	endpoint = temporalnexus.GetOperationInfo(ctx).Endpoint
+	return
 }
 
 // Encode implements converter.PayloadCodec.Encode. It writes the active KeyID
-// into MetadataEncryptionKeyID so Decode (and the codec server) know which key
-// to use.
+// into MetadataEncryptionKeyID so Decode (and the codec server) know which
+// key to use. If KeyID is empty, payloads pass through unencrypted -- e.g.
+// the caller workflow's own at-rest payloads, which don't need the endpoint
+// key. The endpoint-keyed encryption only kicks in where the endpoint
+// matters: the Nexus boundary and the handler-side at-rest payloads.
 func (e *Codec) Encode(payloads []*commonpb.Payload) ([]*commonpb.Payload, error) {
+	if e.KeyID == "" {
+		return payloads, nil
+	}
 	result := make([]*commonpb.Payload, len(payloads))
 	for i, p := range payloads {
 		origBytes, err := p.Marshal()
