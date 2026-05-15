@@ -12,59 +12,40 @@ encryption key per Nexus endpoint. End-to-end:
 ```
 
 The caller and handler workers are both configured with the same encrypting
-`DataConverter` plus a small `WorkerInterceptor` that maps the active Nexus
-endpoint to a `keyID` and seeds it into context. The `DataConverter`
-implements `workflow.ContextAware`, so payloads encoded by either workflow
-carry the correct `MetadataEncryptionKeyID` and stay encrypted at rest in
-both the caller and handler namespaces.
-
-This sample composes three existing patterns; it does not reinvent any:
-
-- Crypto + context-aware codec from `../encryption/`.
-- Two-interceptor (workflow outbound + Nexus inbound) shape from
-  `../nexus-context-propagation/`.
-- Caller / handler / starter topology from `../nexus/`.
+`PayloadCodec` wrapped via `converter.NewCodecDataConverter`. The codec
+implements `converter.PayloadCodecWithSerializationContext` so the SDK hands
+it a `NexusSerializationContext` at every Nexus serialization boundary; the
+codec turns the endpoint name into a keyID via `EndpointKeys` and encrypts
+under that key.
 
 ## How it works
 
-The `DataConverter` does not know about endpoints. It only knows how to read a
-`CryptContext{KeyID: ...}` from the workflow or Go context and encrypt
-payloads with that key. The interceptors are what bind endpoint to key:
+`converter.NexusSerializationContext` is supplied by the SDK at every Nexus
+code boundary:
 
-- Caller side -- `WorkerInterceptor.InterceptWorkflow` returns an outbound
-  interceptor whose `ExecuteNexusOperation` reads
-  `input.Client.Endpoint()`, looks up the `keyID` in `EndpointKeys`, and wraps
-  the workflow context with `CryptContext{KeyID: keyID}` for the duration of
-  the Nexus call.
-- Handler side -- `WorkerInterceptor.InterceptNexusOperation` returns an
-  inbound interceptor whose `StartOperation` reads
-  `temporalnexus.GetOperationInfo(ctx).Endpoint`, looks up the `keyID` in the
-  same `EndpointKeys` map (configured identically on both workers), and
-  attaches `CryptContext` to the Go context. The handler client's
-  `ContextPropagator` then carries `CryptContext` into the handler-started
-  workflow.
+- the caller's `ExecuteNexusOperation` input/result encoding,
+- the handler's Nexus task input/sync-result encoding, and
+- the spawned workflow's input/output for workflow-run operations.
 
-The starter also pre-seeds `CryptContext` on the Go context before calling
-`ExecuteWorkflow`, so the caller workflow's own input and result payloads
-(event #1 onward) are encrypted under the per-endpoint key. Without this step
-the workflow input/result would fall back to the default codec state.
+The codec's `WithSerializationContext` method receives that context, reads
+`Endpoint`, looks up the keyID, and returns a `Codec{KeyID: ...}`. At
+non-Nexus boundaries (plain workflow / activity contexts) it stays in
+pass-through mode and payloads are not encrypted. Decode reads the
+`MetadataEncryptionKeyID` stamped on each payload, so a single `Codec{}`
+decodes payloads from either endpoint -- which is what the codec server
+relies on.
 
-A single `codec-server` registers a `Codec{}` that picks the decryption key
-per payload by reading `MetadataEncryptionKeyID`. Payloads from either
-endpoint decode through the same server.
+No interceptors, no context propagator, no manual header stamping.
 
 ## Prerequisites
 
-- A running [Temporal service](https://github.com/temporalio/samples-go/tree/main/#how-to-use).
-  The dev server (>= 1.30.0) works:
+- A running [Temporal service](https://github.com/temporalio/samples-go/tree/main/#how-to-use)
+  built with Nexus serialization-context support. The dev server works:
 
   ```
   temporal server start-dev
   ```
 
-  The 1.30.0 floor is required so that `temporalnexus.GetOperationInfo(ctx).Endpoint`
-  is populated on the handler side. See the appendix for the fallback on older
-  servers.
 - Two Nexus endpoints, both targeting the handler task queue:
 
   ```
@@ -93,21 +74,24 @@ endpoint decode through the same server.
    ```
    go run ./nexus-per-endpoint-encryption/codec-server
    ```
-4. Run the starter. By default it triggers one workflow per endpoint:
+4. Run the starter. It triggers a single caller workflow that calls four
+   Nexus operations -- echo + hello on each of `endpoint-a` and `endpoint-b`:
    ```
    go run ./nexus-per-endpoint-encryption/caller/starter
    ```
-   Pass `-endpoint endpoint-a` or `-endpoint endpoint-b` to run a single one.
 
 ## What to observe
 
-- In the Temporal UI, list the workflows produced by the starter. Each will
-  have a corresponding handler workflow in the same namespace.
-- Inspect any workflow's events. The raw payloads carry
-  `encryption-key-id = key-a` for the `endpoint-a` runs and
-  `encryption-key-id = key-b` for the `endpoint-b` runs.
-- Run `temporal workflow show --workflow-id <id>` to confirm payloads are not
-  human-readable without the codec.
+- In the Temporal UI, find the caller workflow plus the two `callee_*`
+  handler workflows (one per workflow-run Nexus operation).
+- Inspect the caller workflow's events. The four Nexus operation
+  scheduled/completed events carry payloads tagged with
+  `encryption-key-id = key-a` (for `endpoint-a` calls) and `key-b` (for
+  `endpoint-b` calls) -- both keys appear in the same history. The caller
+  workflow's own input/result are not encrypted: they serialize under a
+  `WorkflowSerializationContext`, which the codec leaves in pass-through.
+- Run `temporal workflow show --workflow-id <id>` to confirm the Nexus
+  payloads are not human-readable without the codec.
 - Re-run with `--codec-endpoint http://localhost:8081/` to decode them:
   ```
   temporal workflow show --workflow-id <id> --codec-endpoint http://localhost:8081/
@@ -116,10 +100,7 @@ endpoint decode through the same server.
 
 ## Architecture summary
 
-- One context-aware `DataConverter` (with `Compress: true`).
-- One `ContextPropagator` carrying `CryptContext` across workflow and Go
-  context boundaries.
-- One `WorkerInterceptor` registered on both worker processes.
+- One `PayloadCodec` implementing `PayloadCodecWithSerializationContext`.
 - One `EndpointKeys map[string]string` literal wired into both worker mains.
 - One codec server.
 
@@ -132,27 +113,18 @@ endpoint decode through the same server.
   the wire and on the payload, never the key material.
 - **Mock `getKey`.** `crypt.go` defines two hardcoded 32-byte AES keys keyed
   by keyID. Replace with a KMS lookup before shipping.
-- **Codec-server has both keys and is unauthenticated.** The same caveat
-  applies: the codec server in this sample knows both `key-a` and `key-b`
-  because the demo wires the literal in. It also binds to `0.0.0.0` with no
-  authentication, so anything that can reach the port can decode payloads. A
-  production codec server must source key material from a KMS, authenticate
-  the caller (e.g. mTLS or OAuth), and restrict network exposure.
+- **Codec-server has both keys and is unauthenticated.** The codec server in
+  this sample knows both `key-a` and `key-b` because the demo wires the
+  literal in. It also binds to `0.0.0.0` with no authentication, so anything
+  that can reach the port can decode payloads. A production codec server
+  must source key material from a KMS, authenticate the caller (e.g. mTLS or
+  OAuth), and restrict network exposure.
 - **Per-endpoint, not per-operation.** The sample keys at endpoint
-  granularity. Per-operation or per-workflow keying would require additional
-  interceptor logic.
+  granularity. Per-operation keying would walk the
+  `NexusSerializationContext.Operation` field instead.
+- **Security note from the SDK docs.** `Endpoint`, `Service`, and
+  `Operation` on `NexusSerializationContext` originate from server-delivered
+  task/header data. Treat them as untrusted input if used in
+  security-sensitive operations.
 - **Headers are not encrypted.** Only payloads are. Nexus headers travel in
   plain text.
-
-## Appendix -- Fallback for Temporal server < 1.30.0
-
-On servers older than 1.30.0, `temporalnexus.GetOperationInfo(ctx).Endpoint`
-returns an empty string. The handler-side interceptor in this sample relies on
-that field. On older servers the standard workaround is the
-"caller writes header / handler reads header" bridge demonstrated by the
-[`nexus-context-propagation`](../nexus-context-propagation/) sample. The
-caller-side outbound interceptor writes the `CryptContext` (or just the
-`keyID`) into `input.NexusHeader[propagationKey]`, and the handler-side
-inbound interceptor reads it from `input.Options.Header[propagationKey]`.
-This couples handler correctness to caller behavior, but is the only viable
-path on servers that do not populate the endpoint on the handler side.

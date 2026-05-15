@@ -9,7 +9,6 @@ import (
 	"github.com/temporalio/samples-go/nexus/options"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -19,23 +18,15 @@ func main() {
 		log.Fatalf("Invalid arguments: %v", err)
 	}
 
-	// Encrypting DataConverter: reads CryptContext from workflow / Go context
-	// via workflow.ContextAware to pick the keyID at encode time.
-	clientOptions.DataConverter = nexusperendpointencryption.NewEncryptingDataConverter(
+	// The Codec implements PayloadCodecWithSerializationContext, so the SDK
+	// hands it a NexusSerializationContext (carrying the endpoint name) at
+	// every Nexus serialization boundary. Inside CodecDataConverter the codec
+	// then selects the per-endpoint key.
+	clientOptions.DataConverter = converter.NewCodecDataConverter(
 		converter.GetDefaultDataConverter(),
-		nexusperendpointencryption.DataConverterOptions{Compress: true},
+		&nexusperendpointencryption.Codec{},
+		converter.NewZlibCodec(converter.ZlibCodecOptions{AlwaysEncode: true}),
 	)
-
-	// The caller-side outbound interceptor stamps the target endpoint into
-	// every Nexus call's header and sets CryptContext on the workflow.Context
-	// for the duration of the call so the operation input encodes under the
-	// per-endpoint key. The same Interceptor is registered as a client
-	// interceptor so client-side ExecuteWorkflow / Query / Update / Signal
-	// also carry the endpoint as a header.
-	ix := &nexusperendpointencryption.Interceptor{
-		EndpointKeys: nexusperendpointencryption.EndpointKeys,
-	}
-	clientOptions.Interceptors = append(clientOptions.Interceptors, ix)
 
 	c, err := client.Dial(clientOptions)
 	if err != nil {
@@ -43,10 +34,7 @@ func main() {
 	}
 	defer c.Close()
 
-	w := worker.New(c, caller.TaskQueue, worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{ix},
-	})
-
+	w := worker.New(c, caller.TaskQueue, worker.Options{})
 	w.RegisterWorkflow(caller.HelloCallerWorkflow)
 
 	if err := w.Run(worker.InterruptCh()); err != nil {

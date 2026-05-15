@@ -35,7 +35,7 @@ var HelloOperation = temporalnexus.NewWorkflowRunOperation(
 		return client.StartWorkflowOptions{
 			// Use the request ID allocated by Temporal so retries dedupe to
 			// the same workflow.
-			ID: "nexus-workflow-operation-" + options.RequestID,
+			ID: "callee_" + options.RequestID,
 		}, nil
 	},
 )

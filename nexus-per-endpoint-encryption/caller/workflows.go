@@ -1,40 +1,44 @@
 // Package caller hosts the caller-side workflow for the
-// nexus-per-endpoint-encryption sample. The workflow takes the target Nexus
-// endpoint as input so the same workflow can be exercised over each endpoint
-// and produce observably different at-rest encryption keys on the wire.
+// nexus-per-endpoint-encryption sample. A single workflow exercises both
+// Nexus endpoints so a run's history shows two different at-rest encryption
+// keys side by side.
 package caller
 
 import (
+	"strings"
+
 	"github.com/temporalio/samples-go/nexus-per-endpoint-encryption/service"
 	"go.temporal.io/sdk/workflow"
 )
 
 const TaskQueue = "nexus-per-endpoint-encryption-caller-tq"
 
-// HelloCallerWorkflow exercises both Nexus operation types over the supplied
-// endpoint:
-//
-//  1. EchoOperation (sync) -- demonstrates the wire-boundary encryption with
-//     no handler-side workflow involved.
-//  2. HelloOperation (workflow-run) -- demonstrates wire-boundary encryption
-//     plus per-endpoint at-rest encryption in the handler's namespace.
-//
-// The endpoint name flows into the WorkflowOutboundInterceptor, which selects
-// the per-endpoint encryption key for each operation invocation.
-func HelloCallerWorkflow(ctx workflow.Context, endpoint, name string) (string, error) {
-	c := workflow.NewNexusClient(endpoint, service.HelloServiceName)
+// HelloCallerWorkflow exercises four Nexus operations -- echo + hello on
+// endpoint-a, then echo + hello on endpoint-b. Each call goes through the
+// NexusSerializationContext-aware codec, so its input/result are encrypted
+// under that endpoint's key. A single run therefore produces history payloads
+// stamped with both key-a and key-b.
+func HelloCallerWorkflow(ctx workflow.Context, name string) (string, error) {
+	endpoints := []string{"endpoint-a", "endpoint-b"}
+	results := make([]string, 0, len(endpoints)*2)
 
-	echoFut := c.ExecuteOperation(ctx, service.EchoOperationName, service.EchoInput{Message: "echo from " + name}, workflow.NexusOperationOptions{})
-	var echoOut service.EchoOutput
-	if err := echoFut.Get(ctx, &echoOut); err != nil {
-		return "", err
+	for _, endpoint := range endpoints {
+		c := workflow.NewNexusClient(endpoint, service.HelloServiceName)
+
+		echoFut := c.ExecuteOperation(ctx, service.EchoOperationName, service.EchoInput{Message: "echo from " + name + " via " + endpoint}, workflow.NexusOperationOptions{})
+		var echoOut service.EchoOutput
+		if err := echoFut.Get(ctx, &echoOut); err != nil {
+			return "", err
+		}
+
+		helloFut := c.ExecuteOperation(ctx, service.HelloOperationName, service.HelloInput{Name: name + " via " + endpoint}, workflow.NexusOperationOptions{})
+		var helloOut service.HelloOutput
+		if err := helloFut.Get(ctx, &helloOut); err != nil {
+			return "", err
+		}
+
+		results = append(results, echoOut.Message, helloOut.Message)
 	}
 
-	helloFut := c.ExecuteOperation(ctx, service.HelloOperationName, service.HelloInput{Name: name}, workflow.NexusOperationOptions{})
-	var helloOut service.HelloOutput
-	if err := helloFut.Get(ctx, &helloOut); err != nil {
-		return "", err
-	}
-
-	return echoOut.Message + " | " + helloOut.Message, nil
+	return strings.Join(results, " | "), nil
 }

@@ -11,7 +11,6 @@ import (
 	"github.com/temporalio/samples-go/nexus/options"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -23,22 +22,16 @@ func main() {
 		log.Fatalf("Invalid arguments: %v", err)
 	}
 
-	// Same encrypting DataConverter wiring as the caller worker.
-	clientOptions.DataConverter = nexusperendpointencryption.NewEncryptingDataConverter(
+	// Same Codec wiring as the caller worker. The SDK passes
+	// NexusSerializationContext into the codec on the handler's Nexus task
+	// (sync result encoding) and on the spawned workflow's input/output
+	// (workflow-run operations), so both paths encrypt under the per-endpoint
+	// key with no interceptor plumbing.
+	clientOptions.DataConverter = converter.NewCodecDataConverter(
 		converter.GetDefaultDataConverter(),
-		nexusperendpointencryption.DataConverterOptions{Compress: true},
+		&nexusperendpointencryption.Codec{},
+		converter.NewZlibCodec(converter.ZlibCodecOptions{AlwaysEncode: true}),
 	)
-
-	// The handler's Nexus inbound interceptor reads the endpoint from the
-	// inbound Nexus header (stamped by the caller-side outbound) and seeds
-	// CryptContext on the Go ctx. The same Interceptor is registered as a
-	// client interceptor so that when temporalnexus.NewWorkflowRunOperation
-	// calls client.ExecuteWorkflow under that ctx, the endpoint lands on the
-	// handler workflow's start header.
-	ix := &nexusperendpointencryption.Interceptor{
-		EndpointKeys: nexusperendpointencryption.EndpointKeys,
-	}
-	clientOptions.Interceptors = append(clientOptions.Interceptors, ix)
 
 	c, err := client.Dial(clientOptions)
 	if err != nil {
@@ -46,9 +39,7 @@ func main() {
 	}
 	defer c.Close()
 
-	w := worker.New(c, taskQueue, worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{ix},
-	})
+	w := worker.New(c, taskQueue, worker.Options{})
 
 	svc := nexus.NewService(service.HelloServiceName)
 	if err := svc.Register(handler.EchoOperation, handler.HelloOperation); err != nil {
