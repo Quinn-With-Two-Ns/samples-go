@@ -42,6 +42,42 @@ func Test_DataConverter_EndpointB(t *testing.T) {
 	require.Equal(t, "Testing endpoint-b", result)
 }
 
+// Test_DataConverter_EndpointAware verifies that wrapping a value in
+// EndpointAware causes ToPayload to look up the per-endpoint key from the
+// EndpointKeys map and encrypt under it, without any CryptContext on ctx.
+// This is the sync-result fallback path.
+func Test_DataConverter_EndpointAware(t *testing.T) {
+	dc := NewEncryptingDataConverter(converter.GetDefaultDataConverter(), DataConverterOptions{})
+
+	for endpoint, keyID := range EndpointKeys {
+		payload, err := dc.ToPayload(EndpointAware{Value: "sync result", Endpoint: endpoint})
+		require.NoError(t, err)
+		require.Equal(t, []byte(keyID), payload.Metadata[MetadataEncryptionKeyID])
+		require.Equal(t, []byte(MetadataEncodingEncrypted), payload.Metadata[converter.MetadataEncoding])
+
+		var result string
+		require.NoError(t, dc.FromPayload(payload, &result))
+		require.Equal(t, "sync result", result)
+	}
+}
+
+// Test_DataConverter_EndpointAware_ToPayloads covers the ToPayloads path used
+// by Workflow Query and Update result encoding.
+func Test_DataConverter_EndpointAware_ToPayloads(t *testing.T) {
+	dc := NewEncryptingDataConverter(converter.GetDefaultDataConverter(), DataConverterOptions{})
+
+	for endpoint, keyID := range EndpointKeys {
+		payloads, err := dc.ToPayloads(EndpointAware{Value: "update result", Endpoint: endpoint})
+		require.NoError(t, err)
+		require.Len(t, payloads.Payloads, 1)
+		require.Equal(t, []byte(keyID), payloads.Payloads[0].Metadata[MetadataEncryptionKeyID])
+
+		var result string
+		require.NoError(t, dc.FromPayloads(payloads, &result))
+		require.Equal(t, "update result", result)
+	}
+}
+
 // Test_DataConverter_CrossKey_Fails encodes under key-a, rewrites the
 // payload's MetadataEncryptionKeyID to "key-b", and asserts that decode fails
 // because AES-GCM authentication rejects the wrong key.

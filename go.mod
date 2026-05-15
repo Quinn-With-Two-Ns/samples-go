@@ -141,9 +141,3 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	inet.af/netaddr v0.0.0-20230525184311-b8eac61e914a // indirect
 )
-
-// Local SDK with WithContext applied to the Nexus sync-result encoding path
-// so context-aware DataConverters / codecs can read NexusOperationContext
-// (e.g. the target endpoint via temporalnexus.GetOperationInfo). Drop once an
-// upstream release includes the same fix.
-replace go.temporal.io/sdk => /Users/quinnklassen/Documents/Code/sdk-go

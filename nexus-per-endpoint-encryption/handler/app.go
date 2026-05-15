@@ -13,15 +13,10 @@ import (
 )
 
 // EchoOperation is a sync Nexus operation. The handler returns immediately
-// without starting a workflow.
-//
-// NOTE: as of Temporal Go SDK 1.43.0 the sync result-encoding path uses the
-// worker's base DataConverter without applying any context-aware view, so the
-// EchoOutput payload is NOT encrypted under the per-endpoint key on the wire.
-// The Nexus operation INPUT, the handler-started workflow input/result (for
-// HelloOperation), and at-rest payloads in the handler workflow's namespace
-// are all endpoint-keyed correctly -- the limitation only affects sync
-// operation outputs.
+// without starting a workflow. The handler-side inbound interceptor wraps the
+// result in EndpointAware so the encrypting DataConverter can recover the
+// target endpoint at ToPayload time -- the sync response has no workflow
+// start header to carry CryptContext through.
 var EchoOperation = nexus.NewSyncOperation(
 	service.EchoOperationName,
 	func(ctx context.Context, input service.EchoInput, _ nexus.StartOperationOptions) (service.EchoOutput, error) {

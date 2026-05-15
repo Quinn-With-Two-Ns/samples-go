@@ -11,7 +11,6 @@ import (
 	"github.com/temporalio/samples-go/nexus/options"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/workflow"
 )
 
 func main() {
@@ -48,17 +47,6 @@ func main() {
 		converter.GetDefaultDataConverter(),
 		nexusperendpointencryption.DataConverterOptions{Compress: true},
 	)
-	// Register the Interceptor as the ContextPropagator so it can carry
-	// CryptContext from Go ctx to workflow start headers. The starter
-	// itself doesn't set CryptContext -- the caller workflow's own at-rest
-	// payloads don't need endpoint-keyed encryption. The propagator only
-	// kicks in for the Nexus call (whose CryptContext is set inside the
-	// workflow's outbound interceptor) and for the handler-side workflow
-	// (whose CryptContext is set by the handler's Nexus inbound interceptor).
-	clientOptions.ContextPropagators = []workflow.ContextPropagator{
-		&nexusperendpointencryption.Interceptor{EndpointKeys: nexusperendpointencryption.EndpointKeys},
-	}
-
 	c, err := client.Dial(clientOptions)
 	if err != nil {
 		log.Fatalln("Unable to create client", err)
